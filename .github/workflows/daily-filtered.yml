@@ -1,0 +1,151 @@
+name: 每日股票分析（动态筛选版）
+
+on:
+  schedule:
+    - cron: '0 10 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '运行模式'
+        required: true
+        default: 'full'
+        type: choice
+        options:
+          - full
+          - market-only
+          - stocks-only
+      force_run:
+        description: '强制运行（跳过交易日检查）'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: stock-analysis-v2
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(vars.ANALYSIS_TIMEOUT_MINUTES || '120') }}
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安装依赖
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 创建必要目录
+        run: mkdir -p data logs reports
+
+      - name: 动态筛选股票
+        id: filter
+        run: |
+          echo "🔍 开始筛选股票（股价<20元、盈利中、市值<=100亿）..."
+          python scripts/filter_stocks.py > /tmp/stock_list.txt 2>&1
+          cat /tmp/stock_list.txt
+          STOCK_LIST=$(cat /tmp/stock_list.txt | grep -v "^📊\|^   \|^WARNING\|^ERROR\|^  " | tr '\n' ',' | sed 's/,$//')
+          if [ -z "$STOCK_LIST" ]; then
+            echo "  ⚠️ 筛选结果为空，使用默认示例"
+            STOCK_LIST="600519,000858,601318"
+          fi
+          echo "STOCK_LIST=$STOCK_LIST" >> $GITHUB_ENV
+          echo "📋 最终分析 ${#STOCK_LIST} 只股票"
+
+      - name: 执行股票分析
+        env:
+          GENERATION_BACKEND: ${{ vars.GENERATION_BACKEND || secrets.GENERATION_BACKEND }}
+          GENERATION_FALLBACK_BACKEND: ${{ vars.GENERATION_FALLBACK_BACKEND || secrets.GENERATION_FALLBACK_BACKEND || 'litellm' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_KEYS: ${{ secrets.OPENAI_API_KEYS }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || secrets.OPENAI_MODEL }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AIHUBMIX_KEY: ${{ secrets.AIHUBMIX_KEY }}
+          ANSPIRE_API_KEYS: ${{ secrets.ANSPIRE_API_KEYS }}
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          TICKFLOW_API_KEY: ${{ secrets.TICKFLOW_API_KEY }}
+          EMAIL_SENDER: ${{ vars.EMAIL_SENDER || secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVERS: ${{ vars.EMAIL_RECEIVERS || secrets.EMAIL_RECEIVERS }}
+          EMAIL_SENDER_NAME: ${{ vars.EMAIL_SENDER_NAME || secrets.EMAIL_SENDER_NAME || 'daily_stock_analysis股票分析助手' }}
+          STOCK_LIST_CONFIG: ${{ env.STOCK_LIST }}
+          MARKET_REVIEW_REGION: ${{ vars.MARKET_REVIEW_REGION || secrets.MARKET_REVIEW_REGION || 'cn' }}
+          REPORT_TYPE: ${{ vars.REPORT_TYPE || secrets.REPORT_TYPE || 'simple' }}
+          MARKET_REVIEW_ENABLED: ${{ vars.MARKET_REVIEW_ENABLED || secrets.MARKET_REVIEW_ENABLED || 'true' }}
+          TRADING_DAY_CHECK_ENABLED: ${{ vars.TRADING_DAY_CHECK_ENABLED || secrets.TRADING_DAY_CHECK_ENABLED || 'true' }}
+          MAX_WORKERS: ${{ vars.MAX_WORKERS || secrets.MAX_WORKERS || '3' }}
+          LOG_LEVEL: INFO
+          REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'tencent,akshare_sina,efinance,akshare_em' }}
+          SEARXNG_PUBLIC_INSTANCES_ENABLED: ${{ vars.SEARXNG_PUBLIC_INSTANCES_ENABLED || 'false' }}
+        run: |
+          STOCK_LIST="${{ env.STOCK_LIST }}"
+          if [ -z "${STOCK_LIST:-}" ]; then
+            export STOCK_LIST="600519"
+          fi
+
+          MODE="${{ github.event.inputs.mode || 'full' }}"
+          FORCE_RUN_ARG=""
+          if [ "${{ github.event.inputs.force_run }}" = "true" ]; then
+            FORCE_RUN_ARG="--force-run"
+            echo "⚡ 已启用强制运行模式"
+          fi
+
+          echo "=========================================="
+          echo "🚀 A股自选股智能分析系统（动态筛选版）"
+          echo "=========================================="
+          echo "⏰ 时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
+          echo "🎯 运行模式: $MODE"
+          echo "📊 自选股: $STOCK_LIST"
+          echo "📝 报告类型: $REPORT_TYPE"
+          echo "🔄 并发数: $MAX_WORKERS"
+          echo ""
+
+          if [ "$MODE" = "market-only" ]; then
+            python main.py --market-review $FORCE_RUN_ARG
+          elif [ "$MODE" = "stocks-only" ]; then
+            python main.py --no-market-review $FORCE_RUN_ARG
+          else
+            python main.py $FORCE_RUN_ARG
+          fi
+
+      - name: 上传分析报告
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: analysis-reports-v2-${{ github.run_number }}
+          path: |
+            reports/
+            logs/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: 显示运行结果
+        if: always()
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "📊 分析完成（动态筛选版）"
+          echo "=========================================="
+          if [ -d "reports" ] && [ "$(ls -A reports 2>/dev/null)" ]; then
+            echo "生成的报告:"
+            ls -la reports/
+          else
+            echo "⚠️ 未生成报告文件"
+          fi
+          echo ""
+          if [ -f "logs/stock_analysis_$(date +%Y%m%d).log" ]; then
+            echo "📜 最近日志（最后 30 行）:"
+            tail -30 logs/stock_analysis_*.log 2>/dev/null || echo "无日志"
+          fi
