@@ -1,70 +1,101 @@
 """
 选股脚本：筛选股价<20元、盈利中(PE>0)、市值<=100亿的A股，取30只
-并附加10只指定股票，输出逗号分隔的代码列表
+并附加10只指定股票，输出逗号分隔的代码列表到stdout
+错误信息输出到stderr，不影响stdout解析
 """
 import sys
-import warnings
 
-warnings.filterwarnings("ignore")
+
+def log(msg):
+    print(msg, file=sys.stderr)
 
 
 def main():
     try:
         import akshare as ak
         import pandas as pd
-    except ImportError:
-        print("ERROR: akshare not installed", file=sys.stderr)
-        sys.exit(1)
+    except ImportError as e:
+        log(f"ERROR: 缺少依赖: {e}")
+        print("")  # empty output -> fallback
+        sys.exit(0)  # don't fail the workflow
 
-    print("📊 正在获取A股实时行情数据...", file=sys.stderr)
+    log("📊 正在获取A股实时行情数据...")
 
-    # 获取所有A股实时行情
-    df = ak.stock_zh_a_spot_em()
-    total_count = len(df)
-    print(f"   获取到 {total_count} 只A股", file=sys.stderr)
+    try:
+        df = ak.stock_zh_a_spot_em()
+    except Exception as e:
+        log(f"ERROR: 获取行情失败: {e}")
+        print("")
+        sys.exit(0)
 
-    # 确保数值列
-    df["price"] = pd.to_numeric(df["最新价"], errors="coerce")
-    df["pe"] = pd.to_numeric(df["市盈率-动态"], errors="coerce")
-    df["market_cap"] = pd.to_numeric(df["总市值"], errors="coerce")
+    total = len(df)
+    log(f"   获取到 {total} 只A股")
 
-    # 筛选条件
+    if total == 0:
+        log("WARNING: 获取数据为空")
+        print("")
+        sys.exit(0)
+
+    # 检查列名
+    log(f"   列名: {list(df.columns)[:10]}...")
+
+    # 映射列名（兼容不同版本）
+    col_map = {}
+    for col in df.columns:
+        if "价" in str(col) and "最新" in str(col):
+            col_map["price"] = col
+        if "市盈率" in str(col):
+            col_map["pe"] = col
+        if "总市值" in str(col):
+            col_map["market_cap"] = col
+        if "代码" in str(col):
+            col_map["code"] = col
+
+    log(f"   列映射: {col_map}")
+
+    if not all(k in col_map for k in ["price", "pe", "market_cap", "code"]):
+        log("ERROR: 必要列缺失")
+        print("")
+        sys.exit(0)
+
+    # 转换数值
+    for src, dst in [("price", "price"), ("pe", "pe"), ("market_cap", "market_cap")]:
+        df[dst] = pd.to_numeric(df[col_map[src]], errors="coerce")
+
+    # 筛选
     mask = (
-        (df["price"] > 0) &          # 有效价格
-        (df["price"] < 20) &         # 股价 < 20元
-        (df["pe"] > 0) &             # 盈利中（PE > 0）
-        (df["market_cap"] <= 1e10)   # 市值 <= 100亿 (1e10 = 100亿)
+        (df["price"] > 0) &
+        (df["price"] < 20) &
+        (df["pe"] > 0) &
+        (df["market_cap"] <= 1e10)
     )
 
     filtered = df[mask].copy()
-    print(f"   符合条件: {len(filtered)} 只", file=sys.stderr)
+    log(f"   符合条件: {len(filtered)} 只")
 
-    if len(filtered) == 0:
-        print("WARNING: 没有符合条件的股票，使用空列表", file=sys.stderr)
-        filtered_codes = []
-    else:
-        # 按市值降序排列，取前30只
+    # 取前30只
+    if len(filtered) > 0:
         filtered = filtered.sort_values("market_cap", ascending=False)
-        filtered_codes = filtered["代码"].head(30).tolist()
+        codes = filtered[col_map["code"]].head(30).tolist()
+    else:
+        codes = []
 
-    # 固定添加的10只股票
-    fixed_stocks = [
+    # 固定添加
+    fixed = [
         "300708", "002400", "113695", "601636", "002065",
         "600550", "159807", "601969", "600596", "420063",
     ]
 
-    # 合并并去重（保持顺序）
     seen = set()
     result = []
-    for code in filtered_codes + fixed_stocks:
+    for code in codes + fixed:
         if code not in seen:
             seen.add(code)
             result.append(code)
 
-    print(f"   最终股票数: {len(result)} 只", file=sys.stderr)
-    print(f"   筛选: {len(filtered_codes)} 只 + 固定: {len(fixed_stocks)} 只", file=sys.stderr)
+    log(f"   最终: {len(result)} 只 (筛选{len(codes)} + 固定{len(fixed)})")
 
-    # 输出逗号分隔的代码列表（stdout）
+    # 仅输出代码列表到stdout
     print(",".join(result))
 
 
