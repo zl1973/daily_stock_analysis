@@ -51,15 +51,21 @@ jobs:
         id: filter
         run: |
           echo "🔍 开始筛选股票（股价<20元、盈利中、市值<=100亿）..."
-          python scripts/filter_stocks.py > /tmp/stock_list.txt 2>&1
+          # 只捕获stdout到文件，stderr直接显示在日志中
+          python scripts/filter_stocks.py > /tmp/stock_list.txt || true
+          # 显示stderr日志（在stdout中混入的状态信息）
+          echo "--- 筛选输出 ---"
           cat /tmp/stock_list.txt
-          STOCK_LIST=$(cat /tmp/stock_list.txt | grep -v "^📊\|^   \|^WARNING\|^ERROR\|^  " | tr '\n' ',' | sed 's/,$//')
+          echo "--- 输出结束 ---"
+          # 提取代码列表（只保留数字和逗号）
+          STOCK_LIST=$(cat /tmp/stock_list.txt | grep -oE '[0-9,]+' | head -1)
           if [ -z "$STOCK_LIST" ]; then
-            echo "  ⚠️ 筛选结果为空，使用默认示例"
-            STOCK_LIST="600519,000858,601318"
+            echo "  ⚠️ 筛选结果为空，使用默认10只 + 固定10只"
+            STOCK_LIST="601288,601988,601398,601328,601818,600028,601857,600019,601006,601618,300708,002400,113695,601636,002065,600550,159807,601969,600596,420063"
           fi
+          STOCK_COUNT=$(echo "$STOCK_LIST" | tr ',' '\n' | wc -l)
           echo "STOCK_LIST=$STOCK_LIST" >> $GITHUB_ENV
-          echo "📋 最终分析 ${#STOCK_LIST} 只股票"
+          echo "📋 最终分析 ${STOCK_COUNT} 只股票"
 
       - name: 执行股票分析
         env:
